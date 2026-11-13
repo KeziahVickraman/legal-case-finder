@@ -1,0 +1,6 @@
+{
+  "name": "Case Finder",
+  "description": "Screen California tenant habitability claims against published court opinions in minutes, with plain-English case summaries and exportable intake briefs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
