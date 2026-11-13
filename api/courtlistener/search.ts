@@ -7,8 +7,11 @@ import {
   type StoredCaseOpinion,
 } from '../_lib/store.ts';
 
+const COURTLISTENER_TOKEN = 'PASTE_TOKEN_HERE';
+
 function httpsGetJson(
-  targetUrl: string
+  targetUrl: string,
+  token: string
 ): Promise<{ statusCode: number; statusMessage: string; body: string }> {
   return new Promise((resolve, reject) => {
     const req = https.get(
@@ -17,6 +20,7 @@ function httpsGetJson(
         headers: {
           Accept: 'application/json',
           'User-Agent': 'CaseFinder/1.0 (legal-research)',
+          Authorization: `Token ${token}`,
         },
       },
       (res) => {
@@ -54,6 +58,16 @@ export default async function courtlistenerSearchHandler(
     return;
   }
 
+  const token = (process.env.COURTLISTENER_TOKEN || COURTLISTENER_TOKEN).trim();
+  if (!token || token === 'PASTE_TOKEN_HERE') {
+    res.status(401).json({
+      statusCode: 401,
+      message: 'Add your CourtListener API token to enable live search.',
+      url: targetUrl,
+    });
+    return;
+  }
+
   const cacheKey = normalizeQueryKey(q);
   const cached = searchCache.get(cacheKey);
   if (cached) {
@@ -66,8 +80,7 @@ export default async function courtlistenerSearchHandler(
   }
 
   try {
-    // Strictly no Authorization header or token sent to CourtListener
-    const upstream = await httpsGetJson(targetUrl);
+    const upstream = await httpsGetJson(targetUrl, token);
 
     let parsedBody: Record<string, unknown> | null = null;
     try {
@@ -79,11 +92,17 @@ export default async function courtlistenerSearchHandler(
     }
 
     if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
-      const message =
+      const rawMessage =
         (parsedBody && typeof parsedBody.detail === 'string' && parsedBody.detail) ||
         (parsedBody && typeof parsedBody.message === 'string' && parsedBody.message) ||
         (parsedBody && typeof parsedBody.error === 'string' && parsedBody.error) ||
         `CourtListener API responded with status ${upstream.statusCode} (${upstream.statusMessage || 'Error'}).`;
+
+      const message =
+        upstream.statusCode === 401 &&
+        rawMessage.toLowerCase().includes('invalid token')
+          ? 'Your CourtListener token is invalid. Re-copy it from your CourtListener API page.'
+          : rawMessage;
 
       res.status(upstream.statusCode).json({
         statusCode: upstream.statusCode,
