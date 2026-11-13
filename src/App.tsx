@@ -4,7 +4,6 @@ import { Navbar } from './components/Navbar';
 import { PricingTab } from './components/PricingTab';
 import { ProductTab } from './components/ProductTab';
 import { WorkspaceTab } from './components/WorkspaceTab';
-import { INITIAL_SAVED_MATTERS } from './data/mockCases';
 import { FirmPlan, PlanId, SavedMatter, TabId } from './types/caseFinder';
 
 const PLANS: Record<PlanId, FirmPlan> = {
@@ -34,16 +33,13 @@ const PLANS: Record<PlanId, FirmPlan> = {
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('product');
   const [currentPlanId, setCurrentPlanId] = useState<PlanId>('team');
-  const [searchesUsed, setSearchesUsed] = useState<number>(37);
-  const [savedMatters, setSavedMatters] = useState<SavedMatter[]>(INITIAL_SAVED_MATTERS);
+  const [searchesUsed, setSearchesUsed] = useState<number>(0);
+  const [savedMatters, setSavedMatters] = useState<SavedMatter[]>([]);
 
   const currentPlan = PLANS[currentPlanId];
 
   const handleSelectPlan = (planId: PlanId) => {
     setCurrentPlanId(planId);
-    if (searchesUsed >= PLANS[planId].monthlyLimit) {
-      setSearchesUsed(Math.min(37, PLANS[planId].monthlyLimit - 1));
-    }
     setActiveTab('workspace');
   };
 
@@ -73,7 +69,6 @@ export default function App() {
             currentPlan={currentPlan}
             searchesUsed={searchesUsed}
             onIncrementUsage={handleIncrementUsage}
-            onSetUsage={setSearchesUsed}
             savedMatters={savedMatters}
             onSaveMatter={handleSaveMatter}
             onGoToPricing={() => setActiveTab('pricing')}

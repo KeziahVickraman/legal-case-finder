@@ -10,7 +10,7 @@ export interface CaseOpinion {
   url: string;
   snippet: string;
   summary: string;
-  relevance: RelevanceLevel;
+  relevance: RelevanceLevel | null;
 }
 
 export interface SavedMatter {
@@ -36,4 +36,5 @@ export interface FirmPlan {
 export interface ApiErrorState {
   statusCode: number;
   message: string;
+  url?: string;
 }

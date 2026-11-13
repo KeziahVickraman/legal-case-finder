@@ -16,11 +16,13 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { MOCK_CASES } from '../data/mockCases';
 import {
   CaseFinderApiError,
   generateQuery,
+  getCachedPipelineResult,
+  isQueryCached,
   searchCases,
+  setCachedPipelineResult,
   summariseCases,
   writeBrief,
 } from '../services/caseFinderApi';
@@ -37,7 +39,6 @@ interface WorkspaceTabProps {
   currentPlan: FirmPlan;
   searchesUsed: number;
   onIncrementUsage: () => void;
-  onSetUsage: (count: number) => void;
   savedMatters: SavedMatter[];
   onSaveMatter: (matter: SavedMatter) => void;
   onGoToPricing: () => void;
@@ -53,25 +54,22 @@ const RELEVANCE_ORDER: Record<RelevanceLevel, number> = {
   Low: 2,
 };
 
-const INITIAL_BRIEF =
-  'Strong support: 3 High-relevance cases (Green v. Superior Court, Knight v. Hallsthammar, and Erlach v. Sierra Asset Servicing, LLC) establish clear California precedent under the implied warranty of habitability for prolonged lack of heating and indoor mold, confirming that tenant occupancy does not waive repair claims and supporting Civil Code § 1942.4 statutory remedies. 2 Medium-relevance appellate decisions further reinforce retroactive rent abatement and companion nuisance damages. Recommend opening the matter, collecting dated repair notices and local code inspection records, and preparing a formal habitability demand.';
-
 export function WorkspaceTab({
   firmName,
   currentPlan,
   searchesUsed,
   onIncrementUsage,
-  onSetUsage,
   savedMatters,
   onSaveMatter,
   onGoToPricing,
 }: WorkspaceTabProps) {
   const [matterName, setMatterName] = useState<string>('');
   const [problemText, setProblemText] = useState<string>('');
-  const [searchQuery, setSearchQuery] = useState<string>('habitability heating mold');
-  const [cases, setCases] = useState<CaseOpinion[]>(MOCK_CASES);
-  const [brief, setBrief] = useState<string>(INITIAL_BRIEF);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [cases, setCases] = useState<CaseOpinion[]>([]);
+  const [brief, setBrief] = useState<string>('');
   const [activeMatterId, setActiveMatterId] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState<boolean>(false);
 
   const [hideLowRelevance, setHideLowRelevance] = useState<boolean>(false);
   const [isGeneratingQuery, setIsGeneratingQuery] = useState<boolean>(false);
@@ -90,9 +88,11 @@ export function WorkspaceTab({
   );
 
   const sortedAndFilteredCases = useMemo(() => {
-    const sorted = [...cases].sort(
-      (a, b) => RELEVANCE_ORDER[a.relevance] - RELEVANCE_ORDER[b.relevance]
-    );
+    const sorted = [...cases].sort((a, b) => {
+      const aRank = a.relevance ? RELEVANCE_ORDER[a.relevance] : 3;
+      const bRank = b.relevance ? RELEVANCE_ORDER[b.relevance] : 3;
+      return aRank - bRank;
+    });
     if (hideLowRelevance) {
       return sorted.filter((c) => c.relevance !== 'Low');
     }
@@ -104,14 +104,10 @@ export function WorkspaceTab({
     [cases]
   );
 
-  const handleLoadSample = () => {
+  const handleFillSample = () => {
     setErrorState(null);
     setMatterName(SAMPLE_MATTER_NAME);
     setProblemText(SAMPLE_COMPLAINT);
-    setSearchQuery('habitability heating mold');
-    setCases(MOCK_CASES);
-    setBrief(INITIAL_BRIEF);
-    setActiveMatterId(null);
   };
 
   const handleNewIntake = () => {
@@ -122,6 +118,7 @@ export function WorkspaceTab({
     setCases([]);
     setBrief('');
     setActiveMatterId(null);
+    setHasSearched(false);
   };
 
   const handleGenerateSearch = async () => {
@@ -132,11 +129,16 @@ export function WorkspaceTab({
       setSearchQuery(generated);
     } catch (err) {
       if (err instanceof CaseFinderApiError) {
-        setErrorState({ statusCode: err.statusCode, message: err.message });
+        setErrorState({
+          statusCode: err.statusCode,
+          message: err.message,
+          url: err.url,
+        });
       } else {
         setErrorState({
           statusCode: 500,
           message: 'Unexpected error generating search query.',
+          url: '/api/gemini/generate-query',
         });
       }
     } finally {
@@ -151,23 +153,56 @@ export function WorkspaceTab({
       return;
     }
 
+    const trimmedQuery = searchQuery.trim();
+    if (!trimmedQuery) {
+      setErrorState({
+        statusCode: 400,
+        message: 'Search query cannot be empty.',
+        url: 'https://www.courtlistener.com/api/rest/v4/search/?q=&type=o&order_by=dateFiled%20desc',
+      });
+      return;
+    }
+
+    const cachedPipeline = getCachedPipelineResult(trimmedQuery, problemText);
+    if (cachedPipeline) {
+      setCases(cachedPipeline.cases);
+      setBrief(cachedPipeline.brief);
+      setActiveMatterId(null);
+      setHasSearched(true);
+      return;
+    }
+
+    const wasQueryCached = isQueryCached(trimmedQuery);
     setIsSearchingCases(true);
-    setLoadingStage('Searching published California court opinions…');
+    setLoadingStage(
+      wasQueryCached
+        ? 'Loading cached CourtListener opinions…'
+        : 'Searching CourtListener court opinions…'
+    );
 
     try {
-      const rawCases = await searchCases(searchQuery);
+      const rawCases = await searchCases(trimmedQuery);
       setLoadingStage('Summarising holdings in plain English…');
-      const summarised = await summariseCases(rawCases);
+      const summarised = await summariseCases(problemText, rawCases);
       setLoadingStage('Drafting intake brief assessment…');
-      const generatedBrief = await writeBrief(summarised, problemText);
+      const generatedBrief = await writeBrief(problemText, summarised);
 
+      setCachedPipelineResult(trimmedQuery, problemText, summarised, generatedBrief);
       setCases(summarised);
       setBrief(generatedBrief);
       setActiveMatterId(null);
-      onIncrementUsage();
+      setHasSearched(true);
+
+      if (!wasQueryCached) {
+        onIncrementUsage();
+      }
     } catch (err) {
       if (err instanceof CaseFinderApiError) {
-        setErrorState({ statusCode: err.statusCode, message: err.message });
+        setErrorState({
+          statusCode: err.statusCode,
+          message: err.message,
+          url: err.url,
+        });
       } else {
         setErrorState({
           statusCode: 500,
@@ -188,9 +223,7 @@ export function WorkspaceTab({
     setSearchQuery(matter.searchQuery);
     setCases(matter.cases);
     setBrief(matter.brief);
-    if (isLimitReached) {
-      onSetUsage(37);
-    }
+    setHasSearched(true);
   };
 
   const handleCopyBrief = async () => {
@@ -217,8 +250,8 @@ export function WorkspaceTab({
     const newMatter: SavedMatter = {
       id: `matter-${Date.now()}`,
       matterName: resolvedName,
-      problemDescription: problemText.trim() || SAMPLE_COMPLAINT,
-      searchQuery: searchQuery.trim() || 'habitability heating mold',
+      problemDescription: problemText.trim(),
+      searchQuery: searchQuery.trim(),
       savedAt: new Date().toISOString().slice(0, 10),
       cases,
       brief,
@@ -230,34 +263,10 @@ export function WorkspaceTab({
     setTimeout(() => setSavedNotice(false), 2200);
   };
 
-  // Demo state helpers so presenter can showcase Empty, Error, and Limit states in one click
-  const applyDemoState = (mode: 'populated' | 'empty' | 'error' | 'limit') => {
-    if (mode === 'populated') {
-      if (searchesUsed >= currentPlan.monthlyLimit) {
-        onSetUsage(37);
-      }
-      handleLoadSample();
-    } else if (mode === 'empty') {
-      if (searchesUsed >= currentPlan.monthlyLimit) {
-        onSetUsage(37);
-      }
-      handleNewIntake();
-    } else if (mode === 'error') {
-      if (searchesUsed >= currentPlan.monthlyLimit) {
-        onSetUsage(37);
-      }
-      setErrorState({
-        statusCode: 502,
-        message:
-          'CourtListener search gateway timed out (HTTP 502). Your monthly search quota was not charged.',
-      });
-    } else if (mode === 'limit') {
-      setErrorState(null);
-      onSetUsage(currentPlan.monthlyLimit);
+  const renderRelevanceBadge = (relevance: RelevanceLevel | null) => {
+    if (!relevance) {
+      return null;
     }
-  };
-
-  const renderRelevanceBadge = (relevance: RelevanceLevel) => {
     if (relevance === 'High') {
       return (
         <span className="inline-flex items-center gap-1.5 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-900 whitespace-nowrap shrink-0">
@@ -318,57 +327,6 @@ export function WorkspaceTab({
                 />
               </div>
             </div>
-
-            {/* State preview switcher for projector walkthroughs */}
-            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
-              <span className="px-2 text-xs font-medium text-slate-500 whitespace-nowrap">
-                Demo view:
-              </span>
-              <button
-                type="button"
-                onClick={() => applyDemoState('populated')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  cases.length > 0 && !errorState && !isLimitReached
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Results
-              </button>
-              <button
-                type="button"
-                onClick={() => applyDemoState('empty')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  cases.length === 0 && !errorState && !isLimitReached
-                    ? 'bg-white text-slate-900 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Empty
-              </button>
-              <button
-                type="button"
-                onClick={() => applyDemoState('error')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  errorState
-                    ? 'bg-white text-red-700 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Error
-              </button>
-              <button
-                type="button"
-                onClick={() => applyDemoState('limit')}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
-                  isLimitReached
-                    ? 'bg-white text-amber-800 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Limit
-              </button>
-            </div>
           </div>
         </div>
       </div>
@@ -395,38 +353,46 @@ export function WorkspaceTab({
               </button>
             </div>
 
-            <p className="mt-3 text-xs leading-relaxed text-slate-500">
-              Select a client matter to reload its saved complaint, search query, and brief.
-            </p>
+            {savedMatters.length === 0 ? (
+              <p className="mt-4 text-sm leading-relaxed text-slate-500">
+                No saved matters yet. Run a search and click <span className="font-semibold text-slate-700">Save to matter</span> to store results here.
+              </p>
+            ) : (
+              <>
+                <p className="mt-3 text-xs leading-relaxed text-slate-500">
+                  Select a client matter to reload its saved complaint, search query, and brief.
+                </p>
 
-            <ul className="mt-4 space-y-2">
-              {savedMatters.map((matter) => {
-                const isSelected = activeMatterId === matter.id;
-                return (
-                  <li key={matter.id}>
-                    <button
-                      type="button"
-                      onClick={() => handleSelectSavedMatter(matter)}
-                      className={`w-full rounded-lg border px-3.5 py-3 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-700 ${
-                        isSelected
-                          ? 'border-blue-800 bg-blue-50/70 text-slate-900'
-                          : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold leading-snug text-slate-900">
-                        {matter.matterName}
-                      </p>
-                      <p className="mt-1 truncate font-mono text-xs text-slate-500">
-                        {matter.searchQuery}
-                      </p>
-                      <p className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
-                        Saved {matter.savedAt} · {matter.cases.length} cases
-                      </p>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                <ul className="mt-4 space-y-2">
+                  {savedMatters.map((matter) => {
+                    const isSelected = activeMatterId === matter.id;
+                    return (
+                      <li key={matter.id}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectSavedMatter(matter)}
+                          className={`w-full rounded-lg border px-3.5 py-3 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-700 ${
+                            isSelected
+                              ? 'border-blue-800 bg-blue-50/70 text-slate-900'
+                              : 'border-slate-200 bg-white text-slate-800 hover:border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          <p className="text-sm font-semibold leading-snug text-slate-900">
+                            {matter.matterName}
+                          </p>
+                          <p className="mt-1 truncate font-mono text-xs text-slate-500">
+                            {matter.searchQuery}
+                          </p>
+                          <p className="mt-1.5 font-mono text-xs text-slate-400 tabular-nums">
+                            Saved {matter.savedAt} · {matter.cases.length} cases
+                          </p>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
           </div>
         </aside>
 
@@ -467,26 +433,32 @@ export function WorkspaceTab({
           {errorState && (
             <div
               role="alert"
-              className="flex flex-col justify-between gap-4 rounded-xl border border-red-300 bg-red-50 p-5 sm:flex-row sm:items-center"
+              className="flex flex-col justify-between gap-4 rounded-xl border border-red-300 bg-red-50 p-5 sm:flex-row sm:items-start"
             >
-              <div className="flex items-start gap-3">
+              <div className="flex items-start gap-3 min-w-0">
                 <AlertTriangle
                   className="mt-0.5 h-5 w-5 shrink-0 text-red-700"
                   aria-hidden="true"
                 />
-                <div>
+                <div className="min-w-0">
                   <p className="text-base font-bold text-red-950">
                     <span className="font-mono">Error {errorState.statusCode}</span> — Request
                     failed
                   </p>
                   <p className="mt-0.5 text-base text-red-900">{errorState.message}</p>
+                  {errorState.url && (
+                    <p className="mt-1.5 break-all font-mono text-xs text-red-800">
+                      URL called: {errorState.url}
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={handleSearchCases}
-                  className="min-h-[40px] rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-900 hover:bg-red-100 whitespace-nowrap"
+                  disabled={isLimitReached}
+                  className="min-h-[40px] rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-semibold text-red-900 hover:bg-red-100 disabled:opacity-50 whitespace-nowrap"
                 >
                   Retry search
                 </button>
@@ -515,7 +487,7 @@ export function WorkspaceTab({
                   </label>
                   <button
                     type="button"
-                    onClick={handleLoadSample}
+                    onClick={handleFillSample}
                     className="text-sm font-semibold text-blue-800 hover:text-blue-950 hover:underline"
                   >
                     Fill example complaint
@@ -581,7 +553,7 @@ export function WorkspaceTab({
                   Suggested search query
                 </label>
                 <p className="mt-1 text-sm text-slate-500">
-                  Review or edit keywords before searching published California court opinions.
+                  Review or edit keywords before searching published court opinions.
                 </p>
                 <div className="mt-3 flex flex-col gap-3 sm:flex-row">
                   <input
@@ -624,7 +596,7 @@ export function WorkspaceTab({
             >
               <Loader2 className="h-9 w-9 animate-spin text-blue-800" aria-hidden="true" />
               <p className="mt-4 text-lg font-semibold text-slate-900">
-                {loadingStage || 'Screening California case law…'}
+                {loadingStage || 'Screening case law…'}
               </p>
               <p className="mt-1 text-base text-slate-500">
                 Querying CourtListener opinions and preparing plain-English summaries.
@@ -637,21 +609,24 @@ export function WorkspaceTab({
             <div className="rounded-xl border border-slate-200 bg-white px-6 py-14 text-center">
               <FileSearch className="mx-auto h-10 w-10 text-slate-400" aria-hidden="true" />
               <h2 className="mt-4 font-display text-2xl font-bold text-slate-900">
-                No case results loaded yet
+                {hasSearched ? 'No matching opinions found' : 'No case results loaded yet'}
               </h2>
               <p className="mx-auto mt-2 max-w-lg text-base text-slate-600">
-                Describe the tenant’s habitability complaint above and run a search, or load our
-                sample heating and mold intake to preview matching California precedent.
+                {hasSearched
+                  ? 'CourtListener returned zero opinions for that query. Try broadening the keywords above and clicking Search cases again.'
+                  : 'Describe the tenant’s habitability complaint above, click Generate search, and then click Search cases to screen real court opinions.'}
               </p>
-              <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleLoadSample}
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-blue-800 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-900"
-                >
-                  Load sample complaint
-                </button>
-              </div>
+              {!hasSearched && (
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleFillSample}
+                    className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-blue-800 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-900"
+                  >
+                    Fill example complaint
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -659,65 +634,67 @@ export function WorkspaceTab({
           {!isSearchingCases && cases.length > 0 && (
             <>
               {/* Intake brief panel */}
-              <section
-                aria-labelledby="intake-brief-heading"
-                className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8"
-              >
-                <div className="flex flex-col justify-between gap-4 border-b border-slate-100 pb-4 sm:flex-row sm:items-center">
-                  <div>
-                    <h2
-                      id="intake-brief-heading"
-                      className="font-display text-2xl font-bold text-slate-900"
-                    >
-                      Intake brief
-                    </h2>
-                    <p className="mt-0.5 text-sm text-slate-500">
-                      One-paragraph assessment based on{' '}
-                      <span className="font-mono tabular-nums">{cases.length}</span> matching
-                      California opinions
-                    </p>
+              {brief && (
+                <section
+                  aria-labelledby="intake-brief-heading"
+                  className="rounded-xl border border-slate-200 bg-white p-6 sm:p-8"
+                >
+                  <div className="flex flex-col justify-between gap-4 border-b border-slate-100 pb-4 sm:flex-row sm:items-center">
+                    <div>
+                      <h2
+                        id="intake-brief-heading"
+                        className="font-display text-2xl font-bold text-slate-900"
+                      >
+                        Intake brief
+                      </h2>
+                      <p className="mt-0.5 text-sm text-slate-500">
+                        One-paragraph assessment based on{' '}
+                        <span className="font-mono tabular-nums">{cases.length}</span> matching
+                        court opinions
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleCopyBrief}
+                        className="inline-flex min-h-[42px] items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 whitespace-nowrap"
+                      >
+                        {copiedBrief ? (
+                          <>
+                            <Check className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+                            Copied brief
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-4 w-4 text-slate-600" aria-hidden="true" />
+                            Copy brief
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveToMatter}
+                        className="inline-flex min-h-[42px] items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-slate-800 whitespace-nowrap"
+                      >
+                        {savedNotice ? (
+                          <>
+                            <Check className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                            Saved to matter
+                          </>
+                        ) : (
+                          <>
+                            <Bookmark className="h-4 w-4" aria-hidden="true" />
+                            Save to matter
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={handleCopyBrief}
-                      className="inline-flex min-h-[42px] items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 whitespace-nowrap"
-                    >
-                      {copiedBrief ? (
-                        <>
-                          <Check className="h-4 w-4 text-emerald-700" aria-hidden="true" />
-                          Copied brief
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-4 w-4 text-slate-600" aria-hidden="true" />
-                          Copy brief
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSaveToMatter}
-                      className="inline-flex min-h-[42px] items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-slate-800 whitespace-nowrap"
-                    >
-                      {savedNotice ? (
-                        <>
-                          <Check className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                          Saved to matter
-                        </>
-                      ) : (
-                        <>
-                          <Bookmark className="h-4 w-4" aria-hidden="true" />
-                          Save to matter
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                <p className="mt-5 text-lg leading-relaxed text-slate-800">{brief}</p>
-              </section>
+                  <p className="mt-5 text-lg leading-relaxed text-slate-800">{brief}</p>
+                </section>
+              )}
 
               {/* Case results header & filter */}
               <section aria-labelledby="results-heading" className="space-y-4">
@@ -765,9 +742,9 @@ export function WorkspaceTab({
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {sortedAndFilteredCases.map((opinion) => (
+                    {sortedAndFilteredCases.map((opinion, index) => (
                       <article
-                        key={`${opinion.caseName}-${opinion.docketNumber}`}
+                        key={`${opinion.caseName}-${opinion.docketNumber}-${index}`}
                         className="rounded-xl border border-slate-200 bg-white p-6 transition-colors hover:border-slate-300"
                       >
                         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -777,10 +754,18 @@ export function WorkspaceTab({
                             </h3>
                             <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-600">
                               <span className="font-medium text-slate-700">{opinion.court}</span>
-                              <span aria-hidden="true">·</span>
-                              <span className="font-mono tabular-nums">{opinion.dateFiled}</span>
-                              <span aria-hidden="true">·</span>
-                              <span className="font-mono">{opinion.docketNumber}</span>
+                              {opinion.dateFiled && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="font-mono tabular-nums">{opinion.dateFiled}</span>
+                                </>
+                              )}
+                              {opinion.docketNumber && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="font-mono">{opinion.docketNumber}</span>
+                                </>
+                              )}
                             </p>
                           </div>
 
@@ -788,7 +773,9 @@ export function WorkspaceTab({
                         </div>
 
                         <p className="mt-4 text-base leading-relaxed text-slate-800">
-                          {opinion.summary}
+                          {opinion.summary ||
+                            opinion.snippet ||
+                            'No summary or excerpt returned for this opinion.'}
                         </p>
 
                         <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4">
@@ -831,10 +818,18 @@ export function WorkspaceTab({
                 </h2>
                 <p className="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-slate-600">
                   <span>{selectedOpinion.court}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">{selectedOpinion.dateFiled}</span>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono">{selectedOpinion.docketNumber}</span>
+                  {selectedOpinion.dateFiled && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono tabular-nums">{selectedOpinion.dateFiled}</span>
+                    </>
+                  )}
+                  {selectedOpinion.docketNumber && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono">{selectedOpinion.docketNumber}</span>
+                    </>
+                  )}
                 </p>
               </div>
               <button
@@ -848,19 +843,23 @@ export function WorkspaceTab({
             </div>
 
             <div className="mt-6 space-y-5">
-              <div>
-                <h3 className="text-sm font-semibold text-slate-500">Plain-English summary</h3>
-                <p className="mt-1.5 text-base leading-relaxed text-slate-900">
-                  {selectedOpinion.summary}
-                </p>
-              </div>
+              {selectedOpinion.summary && (
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-500">Plain-English summary</h3>
+                  <p className="mt-1.5 text-base leading-relaxed text-slate-900">
+                    {selectedOpinion.summary}
+                  </p>
+                </div>
+              )}
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-5">
                 <h3 className="text-sm font-semibold text-slate-500">
                   Opinion excerpt (CourtListener archive)
                 </h3>
                 <p className="mt-2 text-base leading-relaxed text-slate-800">
-                  “{selectedOpinion.snippet}”
+                  {selectedOpinion.snippet
+                    ? `“${selectedOpinion.snippet}”`
+                    : 'No text snippet provided by CourtListener for this record.'}
                 </p>
               </div>
             </div>
