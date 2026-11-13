@@ -23,7 +23,9 @@ export interface SavedMatter {
   brief: string;
 }
 
-export type PlanId = 'solo' | 'team' | 'legalaid';
+export type PlanId = 'free' | 'solo' | 'team' | 'legalaid';
+
+export type UpgradeModalReason = 'save-limit' | 'feature-lock';
 
 export interface FirmPlan {
   id: PlanId;

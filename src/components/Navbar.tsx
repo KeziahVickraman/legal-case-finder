@@ -13,7 +13,7 @@ const NAV_ITEMS: { id: TabId; label: string }[] = [
 
 export function Navbar({ activeTab, onSelectTab }: NavbarProps) {
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
+    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-sm print:hidden">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-8 px-6 py-4 lg:px-8">
         {/* Zone 1: Single text element wordmark */}
         <button

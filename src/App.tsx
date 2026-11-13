@@ -1,13 +1,28 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Footer } from './components/Footer';
 import { Navbar } from './components/Navbar';
 import { PricingTab } from './components/PricingTab';
 import { ProductTab } from './components/ProductTab';
+import { UpgradeModal } from './components/UpgradeModal';
 import { WorkspaceTab } from './components/WorkspaceTab';
-import { fetchSavedMatters, persistSavedMatter } from './services/caseFinderApi';
-import { FirmPlan, PlanId, SavedMatter, TabId } from './types/caseFinder';
+import {
+  FirmPlan,
+  PlanId,
+  SavedMatter,
+  TabId,
+  UpgradeModalReason,
+} from './types/caseFinder';
+
+const FIRM_NAME = 'Bay Area Tenant Law';
 
 const PLANS: Record<PlanId, FirmPlan> = {
+  free: {
+    id: 'free',
+    name: 'Free',
+    badgeLabel: 'Free plan',
+    monthlyLimit: 20,
+    seats: 1,
+  },
   solo: {
     id: 'solo',
     name: 'Solo',
@@ -33,21 +48,13 @@ const PLANS: Record<PlanId, FirmPlan> = {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('product');
-  const [currentPlanId, setCurrentPlanId] = useState<PlanId>('team');
+  const [currentPlanId, setCurrentPlanId] = useState<PlanId>('free');
   const [searchesUsed, setSearchesUsed] = useState<number>(0);
   const [savedMatters, setSavedMatters] = useState<SavedMatter[]>([]);
-
-  useEffect(() => {
-    let mounted = true;
-    fetchSavedMatters().then((matters) => {
-      if (mounted && matters.length > 0) {
-        setSavedMatters(matters);
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, []);
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState<boolean>(false);
+  const [upgradeModalReason, setUpgradeModalReason] =
+    useState<UpgradeModalReason>('feature-lock');
+  const [resetSignal, setResetSignal] = useState<number>(0);
 
   const currentPlan = PLANS[currentPlanId];
 
@@ -58,11 +65,27 @@ export default function App() {
 
   const handleSaveMatter = (matter: SavedMatter) => {
     setSavedMatters((prev) => [matter, ...prev]);
-    void persistSavedMatter(matter);
   };
 
   const handleIncrementUsage = () => {
     setSearchesUsed((prev) => Math.min(currentPlan.monthlyLimit, prev + 1));
+  };
+
+  const handleOpenUpgradeModal = (reason: UpgradeModalReason) => {
+    setUpgradeModalReason(reason);
+    setUpgradeModalOpen(true);
+  };
+
+  const handleConfirmTeamUpgrade = () => {
+    setCurrentPlanId('team');
+  };
+
+  const handleResetDemo = () => {
+    setCurrentPlanId('free');
+    setSavedMatters([]);
+    setSearchesUsed(0);
+    setUpgradeModalOpen(false);
+    setResetSignal((prev) => prev + 1);
   };
 
   return (
@@ -79,22 +102,35 @@ export default function App() {
 
         {activeTab === 'workspace' && (
           <WorkspaceTab
-            firmName="Bay Area Tenant Law"
+            firmName={FIRM_NAME}
             currentPlan={currentPlan}
             searchesUsed={searchesUsed}
             onIncrementUsage={handleIncrementUsage}
             savedMatters={savedMatters}
             onSaveMatter={handleSaveMatter}
-            onGoToPricing={() => setActiveTab('pricing')}
+            onOpenUpgradeModal={handleOpenUpgradeModal}
+            resetSignal={resetSignal}
           />
         )}
 
         {activeTab === 'pricing' && (
-          <PricingTab currentPlanId={currentPlanId} onSelectPlan={handleSelectPlan} />
+          <PricingTab
+            currentPlanId={currentPlanId}
+            onSelectPlan={handleSelectPlan}
+            onOpenTeamUpgrade={() => handleOpenUpgradeModal('feature-lock')}
+          />
         )}
       </main>
 
-      <Footer />
+      <Footer onResetDemo={handleResetDemo} />
+
+      <UpgradeModal
+        isOpen={upgradeModalOpen}
+        reason={upgradeModalReason}
+        firmName={FIRM_NAME}
+        onClose={() => setUpgradeModalOpen(false)}
+        onConfirmUpgrade={handleConfirmTeamUpgrade}
+      />
     </div>
   );
 }

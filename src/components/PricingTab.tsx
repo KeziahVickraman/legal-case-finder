@@ -5,9 +5,14 @@ import { PlanId } from '../types/caseFinder';
 interface PricingTabProps {
   currentPlanId: PlanId;
   onSelectPlan: (planId: PlanId) => void;
+  onOpenTeamUpgrade?: () => void;
 }
 
-export function PricingTab({ currentPlanId, onSelectPlan }: PricingTabProps) {
+export function PricingTab({
+  currentPlanId,
+  onSelectPlan,
+  onOpenTeamUpgrade,
+}: PricingTabProps) {
   const [contactOpen, setContactOpen] = useState(false);
   const [orgName, setOrgName] = useState('');
   const [email, setEmail] = useState('');
@@ -141,10 +146,20 @@ export function PricingTab({ currentPlanId, onSelectPlan }: PricingTabProps) {
 
             <button
               type="button"
-              onClick={() => onSelectPlan('team')}
+              onClick={() => {
+                if (currentPlanId === 'free' && onOpenTeamUpgrade) {
+                  onOpenTeamUpgrade();
+                } else {
+                  onSelectPlan('team');
+                }
+              }}
               className="mt-8 inline-flex min-h-[48px] w-full items-center justify-center rounded-lg bg-blue-800 px-5 py-3 text-base font-semibold text-white transition-colors duration-150 hover:bg-blue-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-700 focus-visible:ring-offset-2"
             >
-              {currentPlanId === 'team' ? 'Continue with Team plan' : 'Start Team free trial'}
+              {currentPlanId === 'team'
+                ? 'Continue with Team plan'
+                : currentPlanId === 'free'
+                ? 'Upgrade to Team'
+                : 'Start Team free trial'}
             </button>
           </article>
 
