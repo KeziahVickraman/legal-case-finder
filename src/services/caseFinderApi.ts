@@ -1,4 +1,4 @@
-import { CaseOpinion, RelevanceLevel } from '../types/caseFinder';
+import { CaseOpinion, RelevanceLevel, SavedMatter } from '../types/caseFinder';
 
 export class CaseFinderApiError extends Error {
   statusCode: number;
@@ -11,9 +11,8 @@ export class CaseFinderApiError extends Error {
   }
 }
 
-// In-memory cache keyed by normalized query string
+// Client-side in-memory cache keyed by normalized query string
 const searchCache = new Map<string, CaseOpinion[]>();
-// Full pipeline cache keyed by normalized query + description
 const summarisedBriefCache = new Map<
   string,
   { cases: CaseOpinion[]; brief: string }
@@ -51,19 +50,6 @@ export function setCachedPipelineResult(
   });
 }
 
-function stripHtml(raw: string): string {
-  return raw
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 async function parseErrorResponse(
   response: Response,
   fallbackUrl: string
@@ -94,8 +80,7 @@ async function parseErrorResponse(
 }
 
 /**
- * 1. generateQuery(description) — Gemini
- * Turns the tenant's plain-English description into a 3-5 word keyword query.
+ * 1. generateQuery(description) — calls /api/gemini/generate-query
  */
 export async function generateQuery(description: string): Promise<string> {
   const endpointUrl = '/api/gemini/generate-query';
@@ -132,19 +117,16 @@ export async function generateQuery(description: string): Promise<string> {
 }
 
 /**
- * 2. searchCases(query) — CourtListener
- * Direct keyless GET to CourtListener REST API v4 (no Authorization header or token).
- * Results are cached per query in memory so repeated searches do not call the API again.
+ * 2. searchCases(query) — calls /api/courtlistener/search
+ * Cached in memory per normalized query so repeated searches do not re-call the API.
  */
 export async function searchCases(query: string): Promise<CaseOpinion[]> {
   const trimmed = query.trim();
   const cacheKey = normalizeQueryKey(trimmed);
-  const courtListenerUrl = `https://www.courtlistener.com/api/rest/v4/search/?q=${encodeURIComponent(
-    trimmed
-  )}&type=o&order_by=dateFiled%20desc`;
+  const endpointUrl = `/api/courtlistener/search?q=${encodeURIComponent(trimmed)}`;
 
   if (!trimmed) {
-    throw new CaseFinderApiError(400, 'Search query cannot be empty.', courtListenerUrl);
+    throw new CaseFinderApiError(400, 'Search query cannot be empty.', endpointUrl);
   }
 
   const cached = searchCache.get(cacheKey);
@@ -154,65 +136,21 @@ export async function searchCases(query: string): Promise<CaseOpinion[]> {
 
   let response: Response;
   try {
-    // Strictly no Authorization header or token sent to CourtListener
-    response = await fetch(courtListenerUrl, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-      },
-    });
+    response = await fetch(endpointUrl, { method: 'GET' });
   } catch (err) {
     throw new CaseFinderApiError(
       502,
-      err instanceof Error ? err.message : 'Network error calling CourtListener API.',
-      courtListenerUrl
+      err instanceof Error ? err.message : 'Network error calling CourtListener endpoint.',
+      endpointUrl
     );
   }
 
   if (!response.ok) {
-    throw await parseErrorResponse(response, courtListenerUrl);
+    throw await parseErrorResponse(response, endpointUrl);
   }
 
-  const data = (await response.json()) as {
-    results?: Array<Record<string, unknown>>;
-  };
-  const rawResults = Array.isArray(data.results) ? data.results : [];
-
-  const cases: CaseOpinion[] = rawResults.slice(0, 8).map((item) => {
-    const opinions = Array.isArray(item.opinions)
-      ? (item.opinions as Array<Record<string, unknown>>)
-      : [];
-    const firstSnippet =
-      (opinions[0] && typeof opinions[0].snippet === 'string' && opinions[0].snippet) ||
-      (typeof item.snippet === 'string' ? item.snippet : '');
-
-    const absoluteUrl = typeof item.absolute_url === 'string' ? item.absolute_url : '';
-
-    return {
-      caseName:
-        (typeof item.caseName === 'string' && item.caseName) ||
-        (typeof item.case_name === 'string' && item.case_name) ||
-        'Untitled Opinion',
-      court:
-        (typeof item.court === 'string' && item.court) ||
-        (typeof item.court_id === 'string' && item.court_id) ||
-        'Unknown Court',
-      dateFiled:
-        (typeof item.dateFiled === 'string' && item.dateFiled) ||
-        (typeof item.date_filed === 'string' && item.date_filed) ||
-        '',
-      docketNumber:
-        (typeof item.docketNumber === 'string' && item.docketNumber) ||
-        (typeof item.docket_number === 'string' && item.docket_number) ||
-        'N/A',
-      url: absoluteUrl
-        ? `https://www.courtlistener.com${absoluteUrl}`
-        : 'https://www.courtlistener.com',
-      snippet: stripHtml(firstSnippet),
-      summary: '',
-      relevance: null,
-    };
-  });
+  const data = (await response.json()) as { cases?: CaseOpinion[] };
+  const cases = Array.isArray(data.cases) ? data.cases : [];
 
   searchCache.set(
     cacheKey,
@@ -238,8 +176,7 @@ export function safeParseGeminiJson<T>(raw: string): T | null {
 }
 
 /**
- * 3. summariseCases(description, cases) — Gemini, ONE request for all cases.
- * Safely falls back to returning cases without summaries if JSON parsing fails.
+ * 3. summariseCases(description, cases) — calls /api/gemini/summarise-cases
  */
 export async function summariseCases(
   description: string,
@@ -312,8 +249,7 @@ export async function summariseCases(
 }
 
 /**
- * 4. writeBrief(description, cases) — Gemini
- * Drafts one paragraph for a lawyer ending with "Research only; not legal advice."
+ * 4. writeBrief(description, cases) — calls /api/gemini/write-brief
  */
 export async function writeBrief(
   description: string,
@@ -341,4 +277,27 @@ export async function writeBrief(
 
   const data = (await response.json()) as { brief?: string };
   return (data.brief ?? '').trim();
+}
+
+export async function fetchSavedMatters(): Promise<SavedMatter[]> {
+  try {
+    const res = await fetch('/api/matters');
+    if (!res.ok) return [];
+    const data = (await res.json()) as { matters?: SavedMatter[] };
+    return Array.isArray(data.matters) ? data.matters : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function persistSavedMatter(matter: SavedMatter): Promise<void> {
+  try {
+    await fetch('/api/matters', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(matter),
+    });
+  } catch {
+    // Client state remains intact even if background sync fails
+  }
 }

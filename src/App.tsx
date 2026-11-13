@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Footer } from './components/Footer';
 import { Navbar } from './components/Navbar';
 import { PricingTab } from './components/PricingTab';
 import { ProductTab } from './components/ProductTab';
 import { WorkspaceTab } from './components/WorkspaceTab';
+import { fetchSavedMatters, persistSavedMatter } from './services/caseFinderApi';
 import { FirmPlan, PlanId, SavedMatter, TabId } from './types/caseFinder';
 
 const PLANS: Record<PlanId, FirmPlan> = {
@@ -36,6 +37,18 @@ export default function App() {
   const [searchesUsed, setSearchesUsed] = useState<number>(0);
   const [savedMatters, setSavedMatters] = useState<SavedMatter[]>([]);
 
+  useEffect(() => {
+    let mounted = true;
+    fetchSavedMatters().then((matters) => {
+      if (mounted && matters.length > 0) {
+        setSavedMatters(matters);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const currentPlan = PLANS[currentPlanId];
 
   const handleSelectPlan = (planId: PlanId) => {
@@ -45,6 +58,7 @@ export default function App() {
 
   const handleSaveMatter = (matter: SavedMatter) => {
     setSavedMatters((prev) => [matter, ...prev]);
+    void persistSavedMatter(matter);
   };
 
   const handleIncrementUsage = () => {
